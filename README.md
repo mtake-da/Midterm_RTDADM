@@ -3,7 +3,8 @@
 
 **Student:** Galymzhan Tamirlan Galymzhanuly | ID: 240542 | Group: BDA-2407  
 **Course:** Real-Time Data Analysis and Decision Making (RTDADM)  
-**University:** Astana IT University, 2026–2027
+**University:** Astana IT University, 2026–2027  
+**GitHub Repository:** [https://github.com/mtake-da/Midterm_RTDADM](https://github.com/mtake-da/Midterm_RTDADM)
 
 ---
 
