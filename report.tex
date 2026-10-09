@@ -1,0 +1,285 @@
+\documentclass[12pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[a4paper, margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{caption}
+\usepackage{parskip}
+\usepackage{enumitem}
+
+% Hyperlink style
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+
+% Code listing style
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{teal},
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!10},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+}
+
+% Title
+\title{
+  \textbf{Midterm Project} \\
+  Real-Time Data Collection and Stream Processing System \\
+  \large AITU Classroom Environmental \& Energy Monitoring
+}
+\author{
+  Galymzhan Tamirlan Galymzhanuly \\
+  Student ID: 240542 | Group: BDA-2407 \\
+  Astana IT University \\
+  Instructor: Serek Azamat
+}
+\date{October 2026}
+
+% ============================================================
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Introduction}
+
+For this midterm I decided to build a real-time stream processing system
+for monitoring a classroom at AITU. The idea came from Assignment~2, where
+we worked with a small batch of classroom sensor data from Room~C1.3.101.
+I wanted to take that dataset further and simulate what it would look like
+if those sensors were streaming data continuously during a whole lecture.
+
+The goal of the system is to process incoming sensor packets one by one,
+compute real-time statistics like rolling averages, and automatically
+raise alerts when something unusual happens — bad air quality,
+the room getting too hot, or an electrical surge.
+
+I tried to make everything reproducible, so the stream generator uses a fixed
+random seed (42) and always produces the same 60-minute sequence.
+
+% ============================================================
+\section{Data Scenario and Stream Architecture}
+
+\subsection{The Room and Sensor Setup}
+
+Room~C1.3.101 is a lecture and lab space at AITU with an official capacity
+of 40 students. The room has four types of sensors:
+\begin{itemize}
+  \item \textbf{Temperature sensor} (Temp\_C) — measures indoor air temperature in °C
+  \item \textbf{CO\textsubscript{2} sensor} (CO2\_ppm) — measures air quality in parts per million
+  \item \textbf{Occupancy camera} (Occupancy) — counts heads using computer vision
+  \item \textbf{Smart power meter} (Power\_kW) — measures total electrical load
+\end{itemize}
+
+Each sensor sends one reading per minute, timestamped at the minute boundary.
+In a real deployment these would go through an MQTT broker or WebSocket
+connection. In my simulation I use a Python generator that yields them one at a time.
+
+\subsection{Data Schema}
+
+\begin{table}[h!]
+\centering
+\caption{Incoming sensor packet schema}
+\begin{tabular}{llll}
+\toprule
+\textbf{Field} & \textbf{Type} & \textbf{Units} & \textbf{Normal Range} \\
+\midrule
+Time       & string  & HH:MM  & 10:00 – 10:59 \\
+Room       & string  & —      & C1.3.101 \\
+Temp\_C    & float   & °C     & 20.0 – 24.0 \\
+CO2\_ppm   & float   & ppm    & 400 – 1000 \\
+Occupancy  & integer & persons & 0 – 40 \\
+Power\_kW  & float   & kW     & 1.5 – 7.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Stream Phases}
+
+I structured the 60-minute stream in phases so that several interesting
+anomalies appear naturally:
+
+\begin{enumerate}
+  \item \textbf{10:00–10:11} — Assignment 2 baseline (12 real records, includes 3 sensor dropouts)
+  \item \textbf{10:12–10:25} — Lecture at full capacity, stable readings
+  \item \textbf{10:26–10:35} — Ventilation failure, CO\textsubscript{2} spikes past 1000 ppm
+  \item \textbf{10:36–10:45} — Thermal accumulation, temperature crosses 24°C
+  \item \textbf{10:46–10:50} — Lab practical, electrical surge above 6 kW
+  \item \textbf{10:51–10:59} — Lecture ends, students leave, everything drops
+\end{enumerate}
+
+% ============================================================
+\section{Implementation}
+
+\subsection{Stream Generator (\texttt{stream\_generator.py})}
+
+I wrote a \texttt{generate\_stream()} function that starts with the
+Assignment~2 baseline records and then continues with simulated data
+for the remaining 48 minutes. The function takes a \texttt{seed} parameter
+so the output is always the same.
+
+The three intentional sensor dropouts (missing values) appear at:
+\begin{itemize}
+  \item 10:02 — Temp\_C missing
+  \item 10:04 — CO2\_ppm missing
+  \item 10:07 — Occupancy missing
+\end{itemize}
+Plus three more dropouts I inject in the extended part
+(at minutes 18, 33, and 44).
+
+\subsection{Stream Processor (\texttt{stream\_processor.py})}
+
+The \texttt{StreamProcessor} class is the core of the project.
+It has a \texttt{process(record)} method that I call for each incoming packet.
+Inside, it does the following steps:
+
+\subsubsection{Step 1: Online Imputation}
+
+Missing values are handled before any calculation. I use two strategies:
+\begin{itemize}
+  \item For continuous sensors (Temp\_C, CO2\_ppm): linear extrapolation
+    from the last two buffered values if available, otherwise forward-fill.
+  \item For discrete sensors (Occupancy): always forward-fill from the last
+    known headcount.
+\end{itemize}
+Any record with a missing value gets a \texttt{SENSOR\_DROPOUT} flag.
+
+\subsubsection{Step 2: Rolling Statistics}
+
+I keep a sliding window (size 5) for each sensor using Python's
+\texttt{deque(maxlen=5)}. For each record I compute:
+\begin{align*}
+  \bar{T}_t &= \frac{1}{5}\sum_{i=t-4}^{t} T_i
+    & \text{(rolling mean temperature)} \\
+  \bar{C}_t &= \frac{1}{5}\sum_{i=t-4}^{t} C_i
+    & \text{(rolling mean CO\textsubscript{2})} \\
+  \bar{P}_t &= \frac{1}{5}\sum_{i=t-4}^{t} P_i
+    & \text{(rolling mean power)} \\
+  \sigma_T^{(t)} &= \text{std}(T_{t-4} \ldots T_t)
+    & \text{(rolling temperature volatility)}
+\end{align*}
+
+\subsubsection{Step 3: Derived Indicators}
+
+\begin{itemize}
+  \item \textbf{Occupancy density}: $d_t = \text{Occupancy}_t / 40$
+  \item \textbf{Energy per occupant}: $e_t = P_t / \max(\text{Occupancy}_t, 1)$
+  \item \textbf{Temperature delta}: $\Delta T_t = T_t - T_{t-1}$
+  \item \textbf{Comfort flag}: True if $20 \le T_t \le 24$ and $\text{CO}_{2,t} \le 1000$
+\end{itemize}
+
+\subsubsection{Step 4: Anomaly Detection}
+
+I check six conditions after each record is processed:
+
+\begin{table}[h!]
+\centering
+\caption{Anomaly detection rules}
+\begin{tabular}{ll}
+\toprule
+\textbf{Alert} & \textbf{Condition} \\
+\midrule
+SENSOR\_DROPOUT     & Any sensor field is None (missing) \\
+CO2\_HIGH           & CO\textsubscript{2} $> 1000$ ppm \\
+CO2\_CRITICAL       & CO\textsubscript{2} $> 1200$ ppm \\
+OVERHEATING         & Temp $> 24.0$°C \\
+UNDERHEATING        & Temp $< 20.0$°C \\
+POWER\_SURGE        & Power $> 6.0$ kW \\
+RAPID\_OCC\_CHANGE  & $|\Delta\text{Occupancy}| \ge 6$ persons/min \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{Results}
+
+After processing all 60 records I got the following statistics:
+
+\begin{itemize}
+  \item \textbf{96 anomaly events} detected across 60 records
+  \item \textbf{30 OVERHEATING} events (10:36–10:59 mostly)
+  \item \textbf{28 POWER\_SURGE} events (10:46–10:59)
+  \item \textbf{20 CO2\_CRITICAL} events (10:32–10:45 range)
+  \item \textbf{10 CO2\_HIGH} events (10:26–10:31)
+  \item \textbf{6 SENSOR\_DROPOUT} events
+  \item \textbf{2 RAPID\_OCC\_CHANGE} events (when students leave)
+\end{itemize}
+
+The most critical situation was around 10:32–10:35, when the room had
+simultaneously high CO\textsubscript{2} (critical level), temperature above 24°C,
+and power near the surge threshold.
+
+\subsection{Dashboard Figure}
+
+The figure generated by my notebook (\texttt{stream\_dashboard.png}) shows
+three subplots sharing a common time axis:
+\begin{enumerate}
+  \item Temperature and CO\textsubscript{2} raw values with 5-step rolling means and threshold lines
+  \item Power consumption and occupancy over time
+  \item Anomaly timeline showing when each alert type fired
+\end{enumerate}
+
+% ============================================================
+\section{Discussion}
+
+\subsection{What Worked Well}
+
+The online imputation worked better than I expected. Because I use linear
+extrapolation from the rolling buffer rather than just forward-filling,
+the imputed values follow the trend of the data pretty closely.
+For example, when the temperature sensor dropped out at 10:02, the imputed
+value (21.8°C) was very close to what would have been recorded.
+
+The anomaly detection is also pretty clean. Because I check multiple conditions
+per record and log each one separately, I can see clearly in the timeline
+how different alert types overlap — for example, during the ventilation failure
+event you can see CO2\_HIGH turning into CO2\_CRITICAL as the concentration builds up.
+
+\subsection{Limitations}
+
+The main limitation is that my stream is simulated. In a real deployment
+you'd want to connect to actual sensor hardware. Also, my anomaly thresholds
+are static — a smarter system would learn the normal range adaptively for
+each room.
+
+Another thing I didn't have time for is sending alerts somewhere useful,
+like a notification to the building management system. Right now it all just
+gets logged to a DataFrame.
+
+\subsection{What I Would Do Differently}
+
+If I had more time I would add:
+\begin{itemize}
+  \item Adaptive thresholds using the rolling standard deviation
+  \item A proper logging system with timestamps and severity levels
+  \item A simple web dashboard using Flask to show the live stream
+\end{itemize}
+
+% ============================================================
+\section{Conclusion}
+
+I built a working real-time stream processing system that takes classroom
+sensor data one record at a time and produces live rolling statistics,
+derived comfort indicators, and rule-based alerts.
+
+The key thing I learned is how different stream processing is from batch processing.
+In batch mode I can sort, fill, and aggregate the entire dataset at once. In stream
+mode I can only use what I've already seen, which forces you to think carefully
+about state management and what information to keep in memory.
+
+Using the Assignment~2 dataset as the baseline made it easy to validate the
+output — I could compare the first 12 processed records against the values
+I computed by hand in Assignment~2 and confirm they matched.
+
+\end{document}
